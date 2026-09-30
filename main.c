@@ -938,6 +938,32 @@ void Handle_State_Power_On(void)
 
     UART2_SendStr("PKE_OPER_STA_POWER_ON out!");
 }
+static void Wakeup_Reinit(void)
+{
+    /* 1. Clock: MCU wakes up on HSI; restore prescaler and re-enable peripheral clocks gated before halt */
+    Clock_Config();                                          // HSI/1 + SPI + TIM2
+    CLK_PeripheralClockConfig(CLK_PERIPHERAL_UART2, ENABLE); // was missing: UART2 clock gated before halt
+
+    /* 2. GPIO: restore power-on configuration */
+    GPIO_Config();                                           // PB4 back to PU_IT, PD0 pull-up restored, etc.
+    GPIO_Init(GPIOC, GPIO_PIN_5, GPIO_MODE_IN_FL_NO_IT);     // SCK back to reset state, driven by SPI
+    GPIO_Init(GPIOC, GPIO_PIN_6, GPIO_MODE_IN_FL_NO_IT);     // MOSI, same as above
+
+    /* 3. Timers */
+    TIM4_Init();                                             // required by Delay_ms
+    TIM2_Init();                                             // 0.1ms interrupt for RF decoding
+
+    /* 4. UART */
+    Uart_Init();
+
+    /* 5. 125k carrier: LF_PLL_SET calls CtrlPWMOutputs(ENABLE) + TIM1_Cmd(ENABLE) */
+    LF_PLL_SET(LF_PLL);
+
+    /* 6. RC522: PcdReset toggles RST low->high; hardware reset exits soft power-down */
+    InitRc522();
+}
+
+
 void Handle_State_Power_Off(void)
 {
     UART2_SendStr("PKE_OPER_STA_POWER_OFF in!");
@@ -947,15 +973,50 @@ void Handle_State_Power_Off(void)
     MOTOR_STOP();
     Delay_ms(50);
     motor_turn_off();
+
+	GPIO_WriteHigh(GPIOD, GPIO_PIN_2);   // syn531 disable
+    GPIO_WriteLow(GPIOE, GPIO_PIN_5);    // 125k LF driver disable
+
+    /* ---- Stop 125k carrier with output held Low ---- */
+    TIM1_CtrlPWMOutputs(DISABLE);
+    TIM1_Cmd(DISABLE);
+    GPIO_Init(GPIOC, GPIO_PIN_1, GPIO_MODE_OUT_PP_LOW_SLOW);  // MCP14E5 IN = 0
+
+    /* ---- RC522 soft power-down (keep RST High to avoid leakage through R15) ---- */
+    PcdAntennaOff();
+    WriteRawRC(CommandReg, 0x10);                             // PowerDown bit
+    while (SPI_GetFlagStatus(SPI_FLAG_BSY) == SET);
+    SPI_Cmd(DISABLE);
+    GPIO_Init(GPIOC, GPIO_PIN_3, GPIO_MODE_OUT_PP_HIGH_SLOW); // RST = High
+    GPIO_Init(GPIOC, GPIO_PIN_4, GPIO_MODE_OUT_PP_HIGH_SLOW); // NSS = High (deselected)
+    GPIO_Init(GPIOC, GPIO_PIN_5, GPIO_MODE_OUT_PP_LOW_SLOW);  // SCK
+    GPIO_Init(GPIOC, GPIO_PIN_6, GPIO_MODE_OUT_PP_LOW_SLOW);  // MOSI
+    GPIO_Init(GPIOC, GPIO_PIN_7, GPIO_MODE_IN_PU_NO_IT);      // MISO
+
+    /* ---- Other I/O ---- */
+    GPIO_Init(GPIOD, GPIO_PIN_0, GPIO_MODE_IN_FL_NO_IT);      // RF DO: remove pull-up
+    GPIO_Init(GPIOA, GPIO_PIN_1, GPIO_MODE_OUT_PP_LOW_SLOW);  // unused
+    GPIO_Init(GPIOB, GPIO_PIN_2, GPIO_MODE_OUT_PP_LOW_SLOW);  // unused
+    GPIO_Init(GPIOD, GPIO_PIN_4, GPIO_MODE_OUT_PP_LOW_SLOW);  // unused
+    GPIO_Init(GPIOD, GPIO_PIN_7, GPIO_MODE_OUT_PP_LOW_SLOW);  // unused
+
+	CLK_PeripheralClockConfig(CLK_PERIPHERAL_SPI, DISABLE);
+	CLK_PeripheralClockConfig(CLK_PERIPHERAL_TIMER2, DISABLE);
+
+	while (UART2_GetFlagStatus(UART2_FLAG_TC) == RESET);   // wait for last byte to finish transmitting
+    UART2_Cmd(DISABLE);
+    CLK_PeripheralClockConfig(CLK_PERIPHERAL_UART2, DISABLE);
+    GPIO_Init(GPIOD, GPIO_PIN_5, GPIO_MODE_OUT_PP_LOW_SLOW);   // TX = 0
+    GPIO_Init(GPIOD, GPIO_PIN_6, GPIO_MODE_IN_FL_NO_IT);       // RX floating input
+	GPIO_Init(GPIOB, GPIO_PIN_4, GPIO_MODE_IN_FL_IT);
+
+    FLASH->CR1 |= FLASH_CR1_HALT;                             // power down Flash during halt
+
+    TJTW_PKE.power_event_flag = 0;   // clear stale flag so only a new EXTI wakes us into POWER_ON/LEARN
     halt();
-    Delay_ms(50);
 
     /* Reinitialize peripherals after wake-up */
-    Clock_Config();
-    GPIO_Config();
-    TIM4_Init();
-    Uart_Init();
-    InitRc522();
+    Wakeup_Reinit();
     Delay_ms(50);
 
     /* Check wake-up source and set next state */
@@ -972,7 +1033,6 @@ void Handle_State_Power_Off(void)
         }
     }
 
-    Uart_Init();
     UART2_SendStr("PKE_OPER_STA_POWER_OFF out!");
 }
 
