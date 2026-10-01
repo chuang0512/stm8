@@ -83,6 +83,7 @@ volatile struct PKE_config {
 #define RX_WINDOW_LOOPS      160   /* Wait time per attempt = RX_WINDOW_LOOPS * 2ms */
 #define ATTEMPTS_PER_VISIT   2     /* Retries per key before rotating */
 #define SEARCH_ROUNDS        3     /* run 3 round */
+#define RETRY_GAP_MS         150   /* After a failed attempt, let the key finish its 2nd copy before next LF */
 
 #define WAIT_POLL_INTERVAL_MS   50U   /* Poll ignition state every 50ms */
 
@@ -594,8 +595,9 @@ void RF_Remote(uint8_t level)
      * ------------------------------------------------------------- */
     if (RF_DATA_LOW())
     {
-        /* Accumulate LOW width in ticks */
-        LL_w++;
+        /* Accumulate LOW width in ticks (saturate: a long quiet LOW must not wrap into the sync range) */
+        if (LL_w < 0xFF)
+            LL_w++;
         RFBit = 0;   /* Mark current level as LOW */
     }
     else
@@ -639,6 +641,15 @@ void RF_Remote(uint8_t level)
                         Buff_B[BitCount >> 3] <<= 1;
                         BitCount++;
                     }
+                }
+                else if ((LL_w >= 35) && (LL_w <= 65))
+                {
+                    /* Sync seen in data mode: the earlier sync was noise
+                     * (preamble LOWs look like bit '1'), restart frame here */
+                    BitCount  = 0;
+                    Buff_B[0] = Buff_B[1] = Buff_B[2] = 0;
+                    Buff_B[3] = Buff_B[4] = Buff_B[5] = 0;
+                    Buff_B[6] = Buff_B[7] = 0;
                 }
                 else
                 {
@@ -920,6 +931,10 @@ void Handle_State_Power_On(void)
                             }
                         }
                         RFFull = 0;
+                    }
+
+                    if (ret == 0) {
+                        Delay_ms(RETRY_GAP_MS);
                     }
 
                 } 
