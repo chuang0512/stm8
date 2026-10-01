@@ -86,6 +86,10 @@ volatile struct PKE_config {
 
 #define WAIT_POLL_INTERVAL_MS   50U   /* Poll ignition state every 50ms */
 
+/* Auto test: if keys exist in EEPROM, skip halt and re-trigger POWER_ON forever. Set to 0 for normal build. */
+#define AUTO_TEST               1
+#define AUTO_TEST_INTERVAL_MS   3000UL  /* Delay between two auto triggers */
+
 /* Key cache in RAM (loaded from EEPROM before halt) */
 uint8_t cached_key_count = 0;
 uint8_t cached_keys[MAX_KEY_NUM][16];  // 5 x 16 bytes
@@ -973,6 +977,21 @@ void Handle_State_Power_Off(void)
     MOTOR_STOP();
     Delay_ms(50);
     motor_turn_off();
+
+#if AUTO_TEST
+    /* Auto test: keys exist -> no halt, simulate Power Key press after a delay */
+    if (cached_key_count > 0) {
+        Delay_ms(AUTO_TEST_INTERVAL_MS);
+        if (TJTW_PKE.power_event_flag && GPIO_ReadInputPin(GPIOA, GPIO_PIN_2)) {
+            TJTW_PKE.oper_state = PKE_OPER_STA_LEARN;   /* still allow learning with LEARN + POWER */
+        } else {
+            TJTW_PKE.oper_state = PKE_OPER_STA_POWER_ON;
+        }
+        TJTW_PKE.power_event_flag = 0;
+        UART2_SendStr("AUTO_TEST trigger!");
+        return;
+    }
+#endif
 
 	GPIO_WriteHigh(GPIOD, GPIO_PIN_2);   // syn531 disable
     GPIO_WriteLow(GPIOE, GPIO_PIN_5);    // 125k LF driver disable
